@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, AsyncGenerator
 import json
 import asyncio
 from datetime import datetime
@@ -29,8 +29,15 @@ class TokenChunk(BaseModel):
     token: str
     role: Literal["assistant"] = "assistant"  # Only assistant for responses
     index: int
-    language: Optional[str] = None
-    is_code: bool = False
+    usage: Optional[TokenUsage] = None
+
+class CodeStartChunk(BaseModel):
+    type: Literal["code_start"]
+    language: str
+    usage: Optional[TokenUsage] = None
+
+class CodeEndChunk(BaseModel):
+    type: Literal["code_end"]
     usage: Optional[TokenUsage] = None
 
 class ErrorChunk(BaseModel):
@@ -42,6 +49,68 @@ class DoneChunk(BaseModel):
     type: Literal["done"]
     finish_reason: Literal["stop", "length", "function_call", "user_abort"]
     usage: Optional[TokenUsage] = None
+
+async def send_chunk(chunk: BaseModel) -> str:
+    """Convert a chunk to JSON and add newline."""
+    return json.dumps(chunk.model_dump()) + "\n"
+
+async def send_start() -> str:
+    """Send the start chunk."""
+    start_msg = StartChunk(type="start")
+    return await send_chunk(start_msg)
+
+async def send_token(token: str, index: int) -> str:
+    """Send a token chunk."""
+    token_msg = TokenChunk(
+        type="token",
+        token=token + " ",
+        role="assistant",
+        index=index,
+    )
+    return await send_chunk(token_msg)
+
+async def send_code_start(language: str) -> str:
+    """Send a code start chunk."""
+    code_start = CodeStartChunk(
+        type="code_start",
+        language=language
+    )
+    return await send_chunk(code_start)
+
+async def send_code_end() -> str:
+    """Send a code end chunk."""
+    code_end = CodeEndChunk(type="code_end")
+    return await send_chunk(code_end)
+
+async def send_done(finish_reason: Literal["stop", "length", "function_call", "user_abort"] = "stop") -> str:
+    """Send the done chunk."""
+    done_msg = DoneChunk(
+        type="done",
+        finish_reason=finish_reason
+    )
+    return await send_chunk(done_msg)
+
+async def send_error(error: str, code: str = "internal_error") -> str:
+    """Send an error chunk."""
+    error_msg = ErrorChunk(
+        type="error",
+        error=error,
+        code=code
+    )
+    return await send_chunk(error_msg)
+
+async def process_token(token: str, index: int) -> AsyncGenerator[str, None]:
+    """Process a single token and yield appropriate chunks."""
+    # Check if this token starts a code block
+    if "def" in token:
+        yield await send_code_start("python")
+    
+    # Send the token
+    yield await send_token(token, index)
+    
+    # Check if this token ends a code block
+    if "!" in token:
+        yield await send_code_end()
 
 @router.post("/chat")
 async def chat(request: ChatRequest):
@@ -55,40 +124,19 @@ async def chat(request: ChatRequest):
             tokens = response_text.split()
             
             # Send start message
-            start_msg = StartChunk(
-                type="start",
-            )
-            yield json.dumps(start_msg.model_dump()) + "\n"
+            yield await send_start()
             
-            # Send token messages
+            # Process each token
             for i, token in enumerate(tokens):
-                is_code = "def" in token or "return" in token or ":" in token
-                language = "python" if is_code else None
-                
-                token_msg = TokenChunk(
-                    type="token",
-                    token=token + " ",
-                    role="assistant",
-                    index=i,
-                    language=language,
-                    is_code=is_code,
-                )
-                yield json.dumps(token_msg.model_dump()) + "\n"
+                async for chunk in process_token(token, i):
+                    yield chunk
                 await asyncio.sleep(0.1)  # Simulate processing delay
             
             # Send done message
-            done_msg = DoneChunk(
-                type="done",
-                finish_reason="stop",
-            )
-            yield json.dumps(done_msg.model_dump()) + "\n"
+            yield await send_done()
+            
         except Exception as e:
-            error_msg = ErrorChunk(
-                type="error",
-                error=str(e),
-                code="internal_error"
-            )
-            yield json.dumps(error_msg.model_dump()) + "\n"
+            yield await send_error(str(e))
 
     return StreamingResponse(
         generate_stream_response(),
