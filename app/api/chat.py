@@ -119,16 +119,32 @@ async def chat(request: ChatRequest):
 
     async def generate_stream_response():
         try:
-            # Simulate streaming response with comprehensive data
-            response_text = "Here's a simple Python function:\n\ndef greet(name: str) -> str:\n    return f'Hello, {name}!'"
-            tokens = response_text.split()
+            # Simulate streaming response with properly indented code
+            response_text = """Here's a simple Python function:
+
+```python
+def greet(name: str) -> str:
+    return f'Hello, {name}!'
+```
+
+And here's a TypeScript interface:
+
+```typescript
+interface User {
+    id: number;
+    name: string;
+    email: string;
+}
+```"""
+            # Split by newlines to preserve indentation
+            lines = response_text.split('\n')
             
             # Send start message
             yield await send_start()
             
-            # Process each token
-            for i, token in enumerate(tokens):
-                async for chunk in process_token(token, i):
+            # Process each line
+            for i, line in enumerate(lines):
+                async for chunk in process_token(line, i):
                     yield chunk
                 await asyncio.sleep(0.1)  # Simulate processing delay
             
