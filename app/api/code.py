@@ -1,36 +1,62 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
-import subprocess
-import tempfile
-import os
-from datetime import datetime
+from typing import Dict, Optional
+from app.services.sandbox import get_sandbox_executor
+from app.models.code_execution import CodeBundle, CodeFile
 
 router = APIRouter()
 
-class CodeExecutionRequest(BaseModel):
+class CodeRequest(BaseModel):
+    """Request model for code execution."""
     code: str
-    language: str
-    version: Optional[str] = None
 
-class CodeExecutionResponse(BaseModel):
-    output: str
+class CodeResponse(BaseModel):
+    """Response model for code execution."""
+    stdout: str
+    stderr: str
+    exit_code: int
     error: Optional[str] = None
-    execution_time: float
 
-# Supported languages and their Docker images
-LANGUAGE_IMAGES = {
-    "python": "python:3.11-slim",
-    "javascript": "node:18-slim",
-    "typescript": "node:18-slim",
-    "java": "openjdk:17-slim",
-}
+# Test script that exercises basic Python functionality
+TEST_SCRIPT = """
+print('Hello from inside Docker!')
+"""
 
-@router.post("/execute", response_model=CodeExecutionResponse)
-async def execute_code(request: CodeExecutionRequest):
-    # Dummy implementation
-    return CodeExecutionResponse(
-        output="Test execution successful!\nAll tests passed.",
-        execution_time=0.5
-    )
+@router.post("/code", response_model=CodeResponse)
+async def execute_code(request: CodeRequest) -> Dict:
+    """
+    Execute Python code in a sandbox environment.
+    
+    Args:
+        request: The code execution request (ignored, using test script)
+        
+    Returns:
+        Execution results including stdout, stderr, and exit code
+    """
+    try:
+        # Create a code bundle with a single file
+        bundle = CodeBundle()
+        
+        # Add the main file with our test script
+        main_file = CodeFile(
+            name="main.py",
+            content=TEST_SCRIPT,
+            language="python-3.12",
+            is_entry_point=True
+        )
+        bundle.add_file(main_file)
+        
+        # Get the sandbox executor
+        executor = get_sandbox_executor()
+        
+        # Execute the code
+        result = executor.execute(bundle)
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error executing code: {str(e)}"
+        )
 

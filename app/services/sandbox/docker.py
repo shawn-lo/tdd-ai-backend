@@ -21,6 +21,33 @@ class DockerSandboxExecutor(SandboxExecutor):
         """
         super().__init__()
         self.timeout = timeout
+        self._check_docker_availability()
+    
+    def _check_docker_availability(self) -> None:
+        """Check if Docker is available and running."""
+        try:
+            # Check if docker command exists
+            result = subprocess.run(
+                ['which', 'docker'],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError("Docker is not installed. Please install Docker first.")
+            
+            # Check if docker daemon is running
+            result = subprocess.run(
+                ['docker', 'info'],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError("Docker daemon is not running. Please start Docker.")
+            
+        except FileNotFoundError:
+            raise RuntimeError("Docker is not installed. Please install Docker first.")
+        except Exception as e:
+            raise RuntimeError(f"Error checking Docker availability: {str(e)}")
     
     def execute(self, bundle: CodeBundle) -> Dict[str, str]:
         """
@@ -66,7 +93,7 @@ class DockerSandboxExecutor(SandboxExecutor):
                 
                 # Build Docker command
                 docker_cmd = [
-                    'docker', 'run',
+                    '/usr/local/bin/docker', 'run',
                     '--rm',  # Remove container after execution
                     '--network=none',  # No network access
                     '--memory=100m',  # Memory limit
