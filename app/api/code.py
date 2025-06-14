@@ -28,7 +28,7 @@ async def execute_code(request: CodeRequest) -> Dict:
     Execute Python code in a sandbox environment.
     
     Args:
-        request: The code execution request (ignored, using test script)
+        request: The code execution request containing the code to execute
         
     Returns:
         Execution results including stdout, stderr, and exit code
@@ -37,10 +37,10 @@ async def execute_code(request: CodeRequest) -> Dict:
         # Create a code bundle with a single file
         bundle = CodeBundle()
         
-        # Add the main file with our test script
+        # Add the main file with the code from the request
         main_file = CodeFile(
             name="main.py",
-            content=TEST_SCRIPT,
+            content=request.code,
             language="python-3.12",
             is_entry_point=True
         )
