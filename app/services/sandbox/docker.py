@@ -49,6 +49,23 @@ class DockerSandboxExecutor(SandboxExecutor):
         except Exception as e:
             raise RuntimeError(f"Error checking Docker availability: {str(e)}")
     
+    def _ensure_test_imports_implementation(self, bundle: CodeBundle) -> None:
+        """
+        Ensure the test file imports from the implementation file.
+        
+        Args:
+            bundle: The code bundle containing test and implementation files
+        """
+        test_file = bundle.get_entry_point()
+        if not test_file or not test_file.name.endswith('.py'):
+            return
+            
+        # Check if the import statement is already present
+        import_statement = "from implementation import *"
+        if import_statement not in test_file.content:
+            # Add the import statement at the beginning of the file
+            test_file.content = f"{import_statement}\n\n{test_file.content}"
+    
     def execute(self, bundle: CodeBundle) -> Dict[str, str]:
         """
         Execute code bundle in a Docker container.
@@ -70,6 +87,9 @@ class DockerSandboxExecutor(SandboxExecutor):
             }
         
         try:
+            # Ensure test file imports from implementation
+            self._ensure_test_imports_implementation(bundle)
+            
             # Create a temporary directory for the code
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
@@ -80,6 +100,7 @@ class DockerSandboxExecutor(SandboxExecutor):
                     file_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(file_path, 'w') as f:
                         f.write(file.content)
+                    logger.info(f"Wrote file {file.name} with content:\n{file.content}")
                 
                 # Get entry point file
                 entry_point = bundle.get_entry_point()
@@ -104,6 +125,8 @@ class DockerSandboxExecutor(SandboxExecutor):
                     '--entrypoint', f'/code/{entry_point.name}'  # Pass the entry point file as argument
                 ]
                 
+                logger.info(f"Executing Docker command: {' '.join(docker_cmd)}")
+                
                 # Execute in Docker
                 process = subprocess.Popen(
                     docker_cmd,
@@ -115,6 +138,7 @@ class DockerSandboxExecutor(SandboxExecutor):
                 
                 try:
                     stdout, stderr = process.communicate(timeout=self.timeout)
+                    logger.info(f"Docker execution result - stdout: {stdout}, stderr: {stderr}, exit_code: {process.returncode}")
                     return {
                         'stdout': stdout,
                         'stderr': stderr,
