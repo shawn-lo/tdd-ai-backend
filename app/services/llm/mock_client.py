@@ -1,20 +1,34 @@
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import asyncio
 
+class MockDelta:
+    def __init__(self, content):
+        self.content = content
+
+class MockChoice:
+    def __init__(self, delta, index=0, finish_reason=None):
+        self.delta = delta
+        self.index = index
+        self.finish_reason = finish_reason
+
+class MockChunk:
+    def __init__(self, content):
+        self.choices = [MockChoice(MockDelta(content))]
+
 class MockLLMClient:
     def __init__(self):
         """Initialize the mock LLM client."""
         self.mock_responses = [
-            "Here's a concise Python implementation for the `add` function:\n\n",
-            "```python\n",
-            "def add(num1, num2):\n",
-            "    return num1 + num2\n",
-            "```\n\n",
-            "You can use this function as follows:\n\n",
-            "```python\n",
-            "result = add(3, 5)\n",
-            "print(result)  # Output: 8\n",
-            "```"
+            MockChunk("Here's a concise Python implementation for the `add` function:\n\n"),
+            MockChunk("```python\n"),
+            MockChunk("def add(num1, num2):\n"),
+            MockChunk("    return num1 + num2\n"),
+            MockChunk("```\n\n"),
+            MockChunk("You can use this function as follows:\n\n"),
+            MockChunk("```python\n"),
+            MockChunk("result = add(3, 5)\n"),
+            MockChunk("print(result)  # Output: 8\n"),
+            MockChunk("```")
         ]
 
     async def chat_completion(
@@ -24,33 +38,7 @@ class MockLLMClient:
         temperature: float = 0.7,
         stream: bool = True
     ) -> AsyncGenerator[Any, None]:
-        """Get a mock chat completion."""
-        class MockStream:
-            def __init__(self, responses):
-                self.responses = responses
-                self.index = 0
-
-            def __iter__(self):
-                return self
-
-            def __next__(self):
-                if self.index >= len(self.responses):
-                    raise StopIteration
-                
-                response = self.responses[self.index]
-                self.index += 1
-                
-                class MockChoice:
-                    class Delta:
-                        content = response
-                    choices = [Delta()]
-                
-                return MockChoice()
-
-        # Simulate network delay
-        await asyncio.sleep(0.1)
-        
-        # Create and yield from mock stream
-        stream = MockStream(self.mock_responses)
-        for chunk in stream:
-            yield chunk 
+        """Yield mock responses asynchronously."""
+        for chunk in self.mock_responses:
+            await asyncio.sleep(0.1)  # simulate delay
+            yield chunk

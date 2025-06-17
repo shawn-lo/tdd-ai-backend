@@ -1,12 +1,24 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Literal, Optional, AsyncGenerator
 import json
+import os
 import asyncio
-from datetime import datetime
+import logging
+from dotenv import load_dotenv
+from app.services.llm.factory import get_llm_client
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
 
 router = APIRouter()
+
+# ----------- Models -----------
 
 class Message(BaseModel):
     role: Literal["user", "assistant", "system"]
@@ -14,6 +26,7 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[Message]
+    language: Optional[str] = "python"
 
 class TokenUsage(BaseModel):
     prompt_tokens: int = 0
@@ -27,7 +40,7 @@ class StartChunk(BaseModel):
 class TokenChunk(BaseModel):
     type: Literal["token"]
     token: str
-    role: Literal["assistant"] = "assistant"  # Only assistant for responses
+    role: Literal["assistant"] = "assistant"
     index: int
     usage: Optional[TokenUsage] = None
 
@@ -50,67 +63,54 @@ class DoneChunk(BaseModel):
     finish_reason: Literal["stop", "length", "function_call", "user_abort"]
     usage: Optional[TokenUsage] = None
 
+# ----------- Chunk Senders -----------
+
 async def send_chunk(chunk: BaseModel) -> str:
-    """Convert a chunk to JSON and add newline."""
-    return json.dumps(chunk.model_dump()) + "\n"
+    return f"data: {json.dumps(chunk.model_dump())}\n\n"
 
 async def send_start() -> str:
-    """Send the start chunk."""
-    start_msg = StartChunk(type="start")
-    return await send_chunk(start_msg)
+    return await send_chunk(StartChunk(type="start"))
 
 async def send_token(token: str, index: int) -> str:
-    """Send a token chunk."""
-    token_msg = TokenChunk(
-        type="token",
-        token=token + " ",
-        role="assistant",
-        index=index,
-    )
-    return await send_chunk(token_msg)
+    await asyncio.sleep(0.01)  # Optional delay to simulate streaming
+    return await send_chunk(TokenChunk(type="token", token=token, index=index))
 
 async def send_code_start(language: str) -> str:
-    """Send a code start chunk."""
-    code_start = CodeStartChunk(
-        type="code_start",
-        language=language
-    )
-    return await send_chunk(code_start)
+    return await send_chunk(CodeStartChunk(type="code_start", language=language))
 
 async def send_code_end() -> str:
-    """Send a code end chunk."""
-    code_end = CodeEndChunk(type="code_end")
-    return await send_chunk(code_end)
+    return await send_chunk(CodeEndChunk(type="code_end"))
 
-async def send_done(finish_reason: Literal["stop", "length", "function_call", "user_abort"] = "stop") -> str:
-    """Send the done chunk."""
-    done_msg = DoneChunk(
-        type="done",
-        finish_reason=finish_reason
-    )
-    return await send_chunk(done_msg)
+async def send_done(reason: Literal["stop", "length", "function_call", "user_abort"] = "stop") -> str:
+    return await send_chunk(DoneChunk(type="done", finish_reason=reason))
 
 async def send_error(error: str, code: str = "internal_error") -> str:
-    """Send an error chunk."""
-    error_msg = ErrorChunk(
-        type="error",
-        error=error,
-        code=code
-    )
-    return await send_chunk(error_msg)
+    return await send_chunk(ErrorChunk(type="error", error=error, code=code))
+
+# ----------- Token Processor -----------
 
 async def process_token(token: str, index: int) -> AsyncGenerator[str, None]:
-    """Process a single token and yield appropriate chunks."""
-    # Check if this token starts a code block
-    if "def" in token:
-        yield await send_code_start("python")
-    
-    # Send the token
+    if not hasattr(process_token, "code_block_open"):
+        process_token.code_block_open = False
+
+    if "```" in token:
+        if not process_token.code_block_open:
+            if "python" in token:
+                yield await send_code_start("python")
+            elif "javascript" in token:
+                yield await send_code_start("javascript")
+            elif "typescript" in token:
+                yield await send_code_start("typescript")
+            else:
+                yield await send_code_start("plaintext")
+            process_token.code_block_open = True
+        else:
+            yield await send_code_end()
+            process_token.code_block_open = False
+
     yield await send_token(token, index)
-    
-    # Check if this token ends a code block
-    if "!" in token:
-        yield await send_code_end()
+
+# ----------- Route -----------
 
 @router.post("/chat")
 async def chat(request: ChatRequest):
@@ -119,42 +119,37 @@ async def chat(request: ChatRequest):
 
     async def generate_stream_response():
         try:
-            # Simulate streaming response with properly indented code
-            response_text = """Here's a simple Python function:
-
-```python
-def greet(name: str) -> str:
-    return f'Hello, {name}!'
-```
-
-And here's a TypeScript interface:
-
-```typescript
-interface User {
-    id: number;
-    name: string;
-    email: string;
-}
-```"""
-            # Split by newlines to preserve indentation
-            lines = response_text.split('\n')
-            
-            # Send start message
             yield await send_start()
-            
-            # Process each line
-            for i, line in enumerate(lines):
-                async for chunk in process_token(line, i):
-                    yield chunk
-                await asyncio.sleep(0.1)  # Simulate processing delay
-            
-            # Send done message
+
+            client = get_llm_client()
+            messages = [{"role": m.role, "content": m.content} for m in request.messages]
+
+            index = 0
+            async for chunk in client.chat_completion(messages=messages):
+                try:
+                    content = chunk.choices[0].delta.content
+                except (AttributeError, IndexError):
+                    continue
+
+                if not content:
+                    continue
+
+                async for response_chunk in process_token(content, index):
+                    yield response_chunk
+                index += 1
+
             yield await send_done()
-            
+
         except Exception as e:
+            logger.error(f"Error in stream response: {e}")
             yield await send_error(str(e))
 
     return StreamingResponse(
         generate_stream_response(),
-        media_type="application/x-ndjson"
-    ) 
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
