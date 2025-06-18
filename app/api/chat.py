@@ -92,76 +92,48 @@ async def send_error(error: str, code: str = "internal_error") -> str:
 CODE_START_IDENTIFIER_SIZE = 11
 CODE_END_IDENTIFIER_SIZE = 4
 
-async def process_token(buffer: deque, token: str, index: int, state: dict[str, str]) -> AsyncGenerator[str, None]:
+async def _handle_buffer_content(buffer: deque, content: str, index: int, state: dict[str, str], identifier: str, identifier_size: int, is_start: bool) -> AsyncGenerator[str, None]:
+    if len(content) < identifier_size:
+        return
     
-    if state['has_found_code']:
-        # Found code block in previous tokens, for future tokens, just emit.
-        yield await send_token(token, index)
-    else:
-        # Handle code block case
-        for c in token:
-            buffer.append(c)
-        recent_str = "".join(buffer)
-
-        # Seek for code block end signal
-        if state['code_block_open']:
-            if len(recent_str) < CODE_END_IDENTIFIER_SIZE:
-                return
-            idx = recent_str.find("```\n")
-            if idx != -1:
-                yield await send_token(recent_str[:idx], index)
-                state['code_block_open'] = False
-                state['has_found_code'] = True
-                yield await send_code_end()
-                buffer.clear()
-                if idx + CODE_END_IDENTIFIER_SIZE < len(recent_str):
-                    for c in recent_str[idx + CODE_END_IDENTIFIER_SIZE:]:
-                        buffer.append(c)
-            else:
-                yield await send_token(recent_str[:-(CODE_END_IDENTIFIER_SIZE-1)], index)
-                buffer.clear()
-                for c in recent_str[-(CODE_END_IDENTIFIER_SIZE-1):]:
-                    buffer.append(c)
+    idx = content.find(identifier)
+    if idx != -1:
+        yield await send_token(content[:idx], index)
+        if is_start:
+            state['code_block_open'] = True
+            yield await send_code_start("python")
         else:
-            if len(recent_str) < CODE_START_IDENTIFIER_SIZE:
-                return
+            state['code_block_open'] = False
+            state['has_found_code'] = True
+            yield await send_code_end()
         
-            idx = recent_str.find("```python\n")
-            if idx != -1:
-                yield await send_token(recent_str[:idx], index)
-                state['code_block_open'] = True
-                yield await send_code_start("python")
-                buffer.clear()
-                if idx + CODE_START_IDENTIFIER_SIZE < len(recent_str):
-                    for c in recent_str[idx + CODE_START_IDENTIFIER_SIZE:]:
-                        buffer.append(c)
-            else:
-                yield await send_token(recent_str[:-(CODE_START_IDENTIFIER_SIZE-1)], index)
-                buffer.clear()
-                for c in recent_str[-(CODE_START_IDENTIFIER_SIZE-1):]:
-                    buffer.append(c)
+        buffer.clear()
+        if idx + identifier_size < len(content):
+            for c in content[idx + identifier_size:]:
+                buffer.append(c)
+    else:
+        yield await send_token(content[:-(identifier_size-1)], index)
+        buffer.clear()
+        for c in content[-(identifier_size-1):]:
+            buffer.append(c)
+
+async def process_token(buffer: deque, token: str, index: int, state: dict[str, str]) -> AsyncGenerator[str, None]:
+    if state['has_found_code']:
+        yield await send_token(token, index)
+        return
+
+    for c in token:
+        buffer.append(c)
+    recent_str = "".join(buffer)
+
+    if state['code_block_open']:
+        async for chunk in _handle_buffer_content(buffer, recent_str, index, state, "```\n", CODE_END_IDENTIFIER_SIZE, False):
+            yield chunk
+    else:
+        async for chunk in _handle_buffer_content(buffer, recent_str, index, state, "```python\n", CODE_START_IDENTIFIER_SIZE, True):
+            yield chunk
 
     index += 1
-
-    # if not hasattr(process_token, "code_block_open"):
-    #     process_token.code_block_open = False
-
-    # if "```" in token:
-    #     if not process_token.code_block_open:
-    #         if "python" in token:
-    #             yield await send_code_start("python")
-    #         elif "javascript" in token:
-    #             yield await send_code_start("javascript")
-    #         elif "typescript" in token:
-    #             yield await send_code_start("typescript")
-    #         else:
-    #             yield await send_code_start("plaintext")
-    #         process_token.code_block_open = True
-    #     else:
-    #         yield await send_code_end()
-    #         process_token.code_block_open = False
-
-    # yield await send_token(token, index)
 
 # ----------- Route -----------
 
