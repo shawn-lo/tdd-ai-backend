@@ -10,44 +10,84 @@ from app.models.code_execution import CodeBundle, CodeFile
 logger = logging.getLogger(__name__)
 
 class DockerSandboxExecutor(SandboxExecutor):
-    """Executes code in a Docker container."""
+    """Executes code in a Docker container or Finch container."""
     
     def __init__(self, timeout: int = 5):
         """
-        Initialize the Docker sandbox executor.
+        Initialize the Docker/Finch sandbox executor.
         
         Args:
             timeout: Maximum execution time in seconds
         """
         super().__init__()
         self.timeout = timeout
-        self._check_docker_availability()
+        self.use_finch = os.getenv('USE_FINCH', 'false').lower() == 'true'
+        self.container_command = self._get_container_command()
+        self._check_container_availability()
     
-    def _check_docker_availability(self) -> None:
-        """Check if Docker is available and running."""
-        try:
-            # Check if docker command exists
-            result = subprocess.run(
-                ['which', 'docker'],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode != 0:
-                raise RuntimeError("Docker is not installed. Please install Docker first.")
+    def _get_container_command(self) -> str:
+        """Get the full path to the container command."""
+        if self.use_finch:
+            # Try to find finch in common locations
+            finch_paths = [
+                '/usr/local/bin/finch',
+                '/opt/homebrew/bin/finch',
+                '/Users/tianyulu/.toolbox/bin/finch',
+                'finch'  # fallback to PATH
+            ]
             
-            # Check if docker daemon is running
+            for path in finch_paths:
+                if os.path.exists(path):
+                    return path
+            
+            # If not found in common paths, try which
+            try:
+                result = subprocess.run(['which', 'finch'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return result.stdout.strip()
+            except:
+                pass
+                
+            return 'finch'  # fallback
+        else:
+            return '/usr/local/bin/docker'
+    
+    def _check_container_availability(self) -> None:
+        """Check if Docker or Finch is available and running."""
+        try:
+            # Check if container command exists
             result = subprocess.run(
-                ['docker', 'info'],
+                ['which', self.container_command],
                 capture_output=True,
-                text=True
+                text=True,
+                env=os.environ
             )
             if result.returncode != 0:
-                raise RuntimeError("Docker daemon is not running. Please start Docker.")
+                raise RuntimeError(f"{self.container_command.capitalize()} is not installed. Please install {self.container_command.capitalize()} first.")
+            
+            # Check if container daemon is running
+            if self.use_finch:
+                result = subprocess.run(
+                    [self.container_command, 'system', 'info'],
+                    capture_output=True,
+                    text=True,
+                    env=os.environ
+                )
+            else:
+                result = subprocess.run(
+                    [self.container_command, 'info'],
+                    capture_output=True,
+                    text=True,
+                    env=os.environ
+                )
+            
+            if result.returncode != 0:
+                raise RuntimeError(f"{self.container_command.capitalize()} daemon is not running. Please start {self.container_command.capitalize()}.")
             
         except FileNotFoundError:
-            raise RuntimeError("Docker is not installed. Please install Docker first.")
+            raise RuntimeError(f"{self.container_command.capitalize()} is not installed. Please install {self.container_command.capitalize()} first.")
         except Exception as e:
-            raise RuntimeError(f"Error checking Docker availability: {str(e)}")
+            raise RuntimeError(f"Error checking {self.container_command.capitalize()} availability: {str(e)}")
     
     def _ensure_test_imports_implementation(self, bundle: CodeBundle) -> None:
         """
@@ -66,9 +106,9 @@ class DockerSandboxExecutor(SandboxExecutor):
             # Add the import statement at the beginning of the file
             test_file.content = f"{import_statement}\n\n{test_file.content}"
     
-    def execute(self, bundle: CodeBundle) -> Dict[str, str]:
+    def execute(self, bundle: CodeBundle) -> Dict[str, str | int | None]:
         """
-        Execute code bundle in a Docker container.
+        Execute code bundle in a Docker or Finch container.
         
         Args:
             bundle: The code bundle to execute
@@ -112,33 +152,46 @@ class DockerSandboxExecutor(SandboxExecutor):
                         'error': 'no_entry_point'
                     }
                 
-                # Build Docker command
-                docker_cmd = [
-                    '/usr/local/bin/docker', 'run',
-                    '--rm',  # Remove container after execution
-                    '--network=none',  # No network access
-                    '--memory=100m',  # Memory limit
-                    '--cpus=0.5',  # CPU limit
-                    '--pids-limit=50',  # Process limit
-                    '-v', f'{temp_dir}:/code:ro',  # Mount code directory read-only
-                    f'python-sandbox:{entry_point.language}',  # Use language-specific image
-                    '--entrypoint', f'/code/{entry_point.name}'  # Pass the entry point file as argument
-                ]
+                # Build container command
+                if self.use_finch:
+                    container_cmd = [
+                        self.container_command, 'run',
+                        '--rm',  # Remove container after execution
+                        '--network=none',  # No network access
+                        '--memory=100m',  # Memory limit
+                        '--cpus=0.5',  # CPU limit
+                        '--pids-limit=50',  # Process limit
+                        '-v', f'{temp_dir}:/code:ro',  # Mount code directory read-only
+                        f'python-sandbox:{entry_point.language}',  # Use language-specific image
+                        '--entrypoint', f'/code/{entry_point.name}'  # Pass the entry point file as argument
+                    ]
+                else:
+                    container_cmd = [
+                        '/usr/local/bin/docker', 'run',
+                        '--rm',  # Remove container after execution
+                        '--network=none',  # No network access
+                        '--memory=100m',  # Memory limit
+                        '--cpus=0.5',  # CPU limit
+                        '--pids-limit=50',  # Process limit
+                        '-v', f'{temp_dir}:/code:ro',  # Mount code directory read-only
+                        f'python-sandbox:{entry_point.language}',  # Use language-specific image
+                        '--entrypoint', f'/code/{entry_point.name}'  # Pass the entry point file as argument
+                    ]
                 
-                logger.info(f"Executing Docker command: {' '.join(docker_cmd)}")
+                logger.info(f"Executing {self.container_command.capitalize()} command: {' '.join(container_cmd)}")
                 
-                # Execute in Docker
+                # Execute in container
                 process = subprocess.Popen(
-                    docker_cmd,
+                    container_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    env={},  # pass empty env to reduce leakage
+                    env=os.environ,  # pass environment variables for Finch
                 )
                 
                 try:
                     stdout, stderr = process.communicate(timeout=self.timeout)
-                    logger.info(f"Docker execution result - stdout: {stdout}, stderr: {stderr}, exit_code: {process.returncode}")
+                    logger.info(f"{self.container_command.capitalize()} execution result - stdout: {stdout}, stderr: {stderr}, exit_code: {process.returncode}")
                     return {
                         'stdout': stdout,
                         'stderr': stderr,
@@ -155,7 +208,7 @@ class DockerSandboxExecutor(SandboxExecutor):
                     }
                 
         except Exception as e:
-            logger.error(f"Error executing code in Docker: {str(e)}", exc_info=True)
+            logger.error(f"Error executing code in {self.container_command.capitalize()}: {str(e)}", exc_info=True)
             return {
                 'stdout': '',
                 'stderr': str(e),
