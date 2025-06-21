@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Literal, Optional, AsyncGenerator
+from typing import List, Literal, Optional, AsyncGenerator, Union
 from collections import deque
 import json
 import os
@@ -34,24 +34,16 @@ class TokenUsage(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
 
+class ContentChunk(BaseModel):
+    type: Literal["token", "code_start", "code_end"]
+    token: Optional[str] = None
+    index: Optional[int] = None
+    usage: Optional[TokenUsage] = None
+    role: Optional[Literal["assistant"]] = "assistant"
+    language: Optional[str] = None
+
 class StartChunk(BaseModel):
     type: Literal["start"]
-    usage: Optional[TokenUsage] = None
-
-class TokenChunk(BaseModel):
-    type: Literal["token"]
-    token: str
-    role: Literal["assistant"] = "assistant"
-    index: int
-    usage: Optional[TokenUsage] = None
-
-class CodeStartChunk(BaseModel):
-    type: Literal["code_start"]
-    language: str
-    usage: Optional[TokenUsage] = None
-
-class CodeEndChunk(BaseModel):
-    type: Literal["code_end"]
     usage: Optional[TokenUsage] = None
 
 class ErrorChunk(BaseModel):
@@ -74,13 +66,13 @@ async def send_start() -> str:
 
 async def send_token(token: str, index: int) -> str:
     await asyncio.sleep(0.01)  # Optional delay to simulate streaming
-    return await send_chunk(TokenChunk(type="token", token=token, index=index))
+    return await send_chunk(ContentChunk(type="token", token=token, index=index))
 
-async def send_code_start(language: str) -> str:
-    return await send_chunk(CodeStartChunk(type="code_start", language=language))
+async def send_code_start(language: str, token: str, index: int) -> str:
+    return await send_chunk(ContentChunk(type="code_start", language=language, token=token, index=index))
 
-async def send_code_end() -> str:
-    return await send_chunk(CodeEndChunk(type="code_end"))
+async def send_code_end(token: str, index: int) -> str:
+    return await send_chunk(ContentChunk(type="code_end", token=token, index=index))
 
 async def send_done(reason: Literal["stop", "length", "function_call", "user_abort"] = "stop") -> str:
     return await send_chunk(DoneChunk(type="done", finish_reason=reason))
@@ -92,7 +84,7 @@ async def send_error(error: str, code: str = "internal_error") -> str:
 CODE_START_IDENTIFIER_SIZE = 11
 CODE_END_IDENTIFIER_SIZE = 4
 
-async def _handle_buffer_content(buffer: deque, content: str, index: int, state: dict[str, str], identifier: str, identifier_size: int, is_start: bool) -> AsyncGenerator[str, None]:
+async def _handle_buffer_content(buffer: deque, content: str, index: int, state: dict[str, bool], identifier: str, identifier_size: int, is_start: bool) -> AsyncGenerator[str, None]:
     if len(content) < identifier_size:
         return
     
@@ -101,11 +93,11 @@ async def _handle_buffer_content(buffer: deque, content: str, index: int, state:
         yield await send_token(content[:idx], index)
         if is_start:
             state['code_block_open'] = True
-            yield await send_code_start("python")
+            yield await send_code_start("python", "```python\n", index)
         else:
             state['code_block_open'] = False
             state['has_found_code'] = True
-            yield await send_code_end()
+            yield await send_code_end("\n```\n", index)
         
         buffer.clear()
         if idx + identifier_size < len(content):
